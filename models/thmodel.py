@@ -103,7 +103,6 @@ class Grid:
         self.div = 1 + gamma * (g/f)
         self.p0 = 1 / self.div
 
-
     def submatrix(self):
 
         self.A = torch.stack(
