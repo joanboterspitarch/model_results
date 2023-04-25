@@ -91,16 +91,16 @@ class Grid:
         )
         self.df_spread.iloc[0] = [self.susceptible, self.infected, self.dead]
 
-    def compute_th_param(self, alpha=1, beta=1, gamma=1, t_min=0):
+    def compute_th_param(self, alpha=1., beta=1., gamma=1., t_min=0, grad=False):
 
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
+        self.alpha = torch.tensor(alpha, requires_grad=grad).float()
+        self.beta = torch.tensor(beta, requires_grad=grad).float()
+        self.gamma = torch.tensor(gamma, requires_grad=grad).float()
 
-        f = (self.Temp - t_min)**alpha
-        g = (self.Hum)**beta
+        f = (self.Temp - t_min)**self.alpha
+        g = (self.Hum)**self.beta
 
-        self.div = 1 + gamma * (g/f)
+        self.div = 1 + self.gamma * (g/f)
         self.p0 = 1 / self.div
 
     def submatrix(self):
@@ -312,4 +312,62 @@ class Grid:
             dim=-1
         )
     
+
+def Train(x, y, alpha=1., beta=1., gamma=1., delta=0.95, a1=1, a2=3, inc=1, part=[0.1, 0.5, 0.9], n_it=100, epochs=10):
+
+    torch.random.manual_seed(0)
+    np.random.seed(0)
     
+    x.Train.values[0] = False
+    indices = np.argwhere(x.Train.values==True).flatten()
+    target = torch.from_numpy(y[:, :, 1:]).to(dtype=torch.float)
+    target = torch.where(
+        target==0,
+        0,
+        1
+    ).float()
+
+    l1 = nn.MSELoss()
+    l2 = nn.BCELoss()
+
+    for epoch in range(epochs):
+
+        print('Epoch: ', epoch)
+
+        thmodel = Grid(x=x, y=y, mode='gumbel')
+        thmodel.initialize(inc=inc, part=part)
+        thmodel.compute_th_param(alpha=alpha, beta=beta, gamma=gamma, grad=True)
+        thmodel.submatrix()
+        thmodel.enlargement_process()
+        thmodel.montecarlo(n_it=n_it)
+
+        optimizer = torch.optim.Adam([thmodel.alpha, thmodel.beta, thmodel.gamma], lr=0.15)
+
+        loss = 0
+        optimizer.zero_grad()
+        r = 0
+        for ind in indices:
+            probs = (thmodel.X1[:, :, ind] + thmodel.X2[:, :, ind]).flatten().float()
+            #l_1 = a1*l1(probs, target[:, :, r].flatten())
+            #l_2 = a2*l2(probs, target[:, :, r].flatten())
+            #loss += (delta**r)*(l_1 + l_2)
+            loss = l2(probs, target[:, :, r].flatten())
+            r += 1
+        
+        loss.backward()
+        optimizer.step()
+        alpha = thmodel.alpha.clone().item()
+        beta = thmodel.beta.clone().item()
+        gamma = thmodel.gamma.clone().item()
+
+        print('Loss: ', loss.item())
+        print('Alpha: ', alpha)
+        print('Beta: ', beta)
+        print('Gamma: ', gamma)  
+    
+    return thmodel, alpha, beta, gamma
+
+
+
+
+        
