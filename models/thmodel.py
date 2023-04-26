@@ -327,7 +327,7 @@ def Train(x, y, alpha=1., beta=1., gamma=1., delta=0.95, a1=1, a2=3, inc=1, part
         1
     ).float()
 
-    l1 = nn.MSELoss()
+    l1 = nn.MSELoss(reduction='sum')
     l2 = nn.BCELoss()
 
     for epoch in range(epochs):
@@ -341,29 +341,31 @@ def Train(x, y, alpha=1., beta=1., gamma=1., delta=0.95, a1=1, a2=3, inc=1, part
         thmodel.enlargement_process()
         thmodel.montecarlo(n_it=n_it)
 
-        optimizer = torch.optim.Adam([thmodel.alpha, thmodel.beta, thmodel.gamma], lr=0.15)
+        #optimizer = torch.optim.Adam([thmodel.alpha, thmodel.beta, thmodel.gamma], lr=0.15)
 
         loss = 0
-        optimizer.zero_grad()
+        #optimizer.zero_grad()
         r = 0
         for ind in indices:
             probs = (thmodel.X1[:, :, ind] + thmodel.X2[:, :, ind]).flatten().float()
             #l_1 = a1*l1(probs, target[:, :, r].flatten())
             #l_2 = a2*l2(probs, target[:, :, r].flatten())
             #loss += (delta**r)*(l_1 + l_2)
-            loss = l2(probs, target[:, :, r].flatten())
+            loss += (gamma**r)*(l2(probs, target[:, :, r].flatten()) + l1(probs, target[:, :, r].flatten()))
             r += 1
+        # normalize the gradients
         
+
         loss.backward()
-        optimizer.step()
-        alpha = thmodel.alpha.clone().item()
-        beta = thmodel.beta.clone().item()
-        gamma = thmodel.gamma.clone().item()
+        #optimizer.step()
+        with torch.no_grad():
+            alpha += 0.1 * thmodel.alpha.grad / (thmodel.alpha.grad.norm() + 1e-8)
+            beta += 0.1 * thmodel.beta.grad / (thmodel.beta.grad.norm() + 1e-8)
+            gamma += 0.1 * thmodel.gamma.grad / (thmodel.gamma.grad.norm() + 1e-8)
 
         print('Loss: ', loss.item())
-        print('Alpha: ', alpha)
-        print('Beta: ', beta)
-        print('Gamma: ', gamma)  
+        print('Alpha: ', alpha.item(), 'Beta: ', beta.item(), 'Gamma: ', gamma.item())
+        #print('Gradientes: ', thmodel.alpha.grad.item(), thmodel.beta.grad.item(), thmodel.gamma.grad.item())
     
     return thmodel, alpha, beta, gamma
 
