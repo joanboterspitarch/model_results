@@ -9,7 +9,35 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def enlarge_process(matrix, n, C):
 
+    row = matrix[0, :].numpy()
+    col = matrix[:, -1].numpy()
+    col = col[::-1]
+    size = row.shape[0]
+    A = matrix.numpy()
+
+    for i in range(1, n):
+        A_aux = np.zeros((size+1, size+1))
+        A_aux[-size:, 0:size] = A.copy()
+
+        new_row, new_col = np.zeros(size+1), np.zeros(size+1)
+
+        new_row[:-2], new_row[-1] = row[:-1]/C, row[-1]/C
+        new_row[-2] = (new_row[-3] + new_row[-1])/2
+
+        new_col[:-2], new_col[-1] = col[:-1]/C, col[-1]/C
+        new_col[-2] = (new_col[-3] + new_col[-1])/2
+
+        
+        A_aux[0, :] = new_row.copy()
+        A_aux[:, -1][::-1] = new_col.copy()     
+
+        A = A_aux.copy()
+        row, col = new_row.copy(), new_col.copy()
+        size = row.shape[0]
+
+    return torch.from_numpy(A).float()
 
 class Grid:
 
@@ -45,13 +73,11 @@ class Grid:
         self.Theta = torch.from_numpy(self.x.Theta.values).float()
         self.Rho = torch.from_numpy(self.x.Rho.values).float()
     
-    def initialize(self, inc=1, part=[0.1, 0.5, 0.9], p0=0.5, div=2):
-
-        if len(part)!=3:
-            raise ValueError('Partition must have 3 values.')
-        
+    def initialize(self, inc=1, part=[0, 0.1, 0.5, 0.9, 1.01], p0=0.5, div=2):
+ 
         self.inc = inc # delay steps between infected and dead cells.
-        self.partition = part # partition of the rho axis (3 values). 
+        self.partition = part # partition of the rho axis (3 values).
+        self.n = len(part) - 2
         self.p0 = p0  # probability of infection when rho <= part[0].
         self.div = div  # loss factor for further cells.
 
@@ -64,19 +90,21 @@ class Grid:
             (self.Q/2)*torch.pi - self.Theta
         )
 
-        self.m = torch.where(
-            self.Rho <= self.partition[1],
-            torch.where(
-                self.Rho <= self.partition[0],
-                0,
-                1
-            ),
-            torch.where(
-                self.Rho <= self.partition[2],
-                2,
-                3
-            )
-        ).type(torch.int8)
+        self.m = torch.zeros_like(self.Rho, dtype=torch.int)
+        for i, rho in enumerate(self.Rho):
+            cont = -1
+            aux = False
+            while not aux:
+                try:
+                    cont += 1
+                    a = (part[cont] <= rho) and (rho <= part[cont+1])
+                    b = (part[cont+1] <= rho) and (rho <= part[cont+2])
+                    if a and not b:
+                        aux = True
+                        self.m[i] = cont
+                except IndexError:
+                    self.m[i] = self.n + 1
+                
 
         # create dataframes to save data
         self.df_wind = pd.DataFrame(
@@ -96,55 +124,38 @@ class Grid:
         self.df_spread.iloc[0] = [self.susceptible, self.infected, self.dead]
         
     def submatrix(self):
-
-        self.A = torch.stack(
-            (
-                self.Xi.sin(),
-                torch.where(
-                    self.Xi <= torch.pi/4,
-                    torch.tan(self.Xi),
-                    1/torch.tan(self.Xi)
-                ),
-                self.Xi.cos()
-            ),
-            dim=1
-        ).float()
+        sin = torch.sin(self.Xi)
+        cos = torch.cos(self.Xi)
+        f = torch.where(
+            self.Xi <= torch.pi/4,
+            torch.tan(self.Xi),
+            1/torch.tan(self.Xi)
+        )
+        self.A = torch.zeros(2, 2, self.K, dtype=torch.float)
+        self.A[0, 0, :] = sin
+        self.A[0, 1, :] = f
+        self.A[1, 0, :] = 0
+        self.A[1, 1, :] = cos
 
     def enlargement_process(self):
-        
-        self.large_matrices = torch.zeros(
-            (7, 7, self.K),
-            dtype=torch.float
-        )
-        
+
+        self.large_matrices = torch.zeros(2*self.n+1, 2*self.n+1, self.K, dtype=torch.float)
+
         # when rho <= part[0]
         ind1 = (self.m == 0)
-        self.large_matrices[2:5, 2:5, ind1] = self.p0
-        self.large_matrices[3, 3, ind1] = 0
+        self.large_matrices[(self.n-1):(self.n+2), (self.n-1):(self.n+2), ind1] = self.p0
+        self.large_matrices[self.n, self.n, ind1] = 0
 
-        # when part[0] < rho <= part[1]
-        ind2 = (self.m >= 1)
-        self.large_matrices[2, 3, ind2] = self.A[ind2, 0].clone()
-        self.large_matrices[2, 4, ind2] = self.A[ind2, 1].clone()
-        self.large_matrices[3, 4, ind2] = self.A[ind2, 2].clone()
+        # ENLARGEMENT PROCESS
 
-        # when part[1] < rho <= part[2]
-        ind3 = (self.m >= 2)
-        self.large_matrices[1, 3, ind3] = (self.A[ind3, 0]/self.div).clone()
-        self.large_matrices[1, 5, ind3] = (self.A[ind3, 1]/self.div).clone()
-        self.large_matrices[3, 5, ind3] = (self.A[ind3, 2]/self.div).clone()
-        self.large_matrices[1, 4, ind3] = ((self.large_matrices[1, 3, ind3] + self.large_matrices[1, 5, ind3])/2).clone()
-        self.large_matrices[2, 5, ind3] = ((self.large_matrices[1, 5, ind3] + self.large_matrices[3, 5, ind3])/2).clone()
+        ind = torch.argwhere(self.m != 0)
 
-        # when rho > part[2]
-        ind4 = (self.m == 3)
-        self.large_matrices[0, 3, ind4] = (self.A[ind4, 0]/(self.div**2)).clone()
-        self.large_matrices[0, 6, ind4] = (self.A[ind4, 1]/(self.div**2)).clone()
-        self.large_matrices[3, 6, ind4] = (self.A[ind4, 2]/(self.div**2)).clone()
-        self.large_matrices[0, 4, ind4] = (self.large_matrices[1, 4, ind4]/self.div).clone()
-        self.large_matrices[2, 6, ind4] = (self.large_matrices[2, 5, ind4]/self.div).clone()
-        self.large_matrices[0, 5, ind4] = ((self.large_matrices[0, 4, ind4] + self.large_matrices[0, 6, ind4])/2).clone()
-        self.large_matrices[1, 6, ind4] = ((self.large_matrices[0, 6, ind4] + self.large_matrices[2, 6, ind4])/2).clone()
+        for i in ind:
+            m = self.m[i]
+            A = self.A[:, :, i].reshape(2, 2).clone()
+            new_A = enlarge_process(matrix=A, n=m, C=self.div)
+            size = new_A.shape[0]
+            self.large_matrices[(self.n-size+1):(self.n+1), (self.n):(self.n+size), i] = new_A.reshape(size, size, 1)
 
         # rotate the matrices to the right position
         q2 = (self.Q == 2)
@@ -176,10 +187,10 @@ class Grid:
     
     def neighbourhood_relation(self, step):
 
-        padding = torch.zeros(self.N + 6, self.N + 6, dtype=torch.float)
+        padding = torch.zeros(self.N + 2*self.n, self.N + 2*self.n, dtype=torch.float)
         for i,j in self.ind:
-            padding[i:(i+7), j:(j+7)] += self.large_matrices[:, :, step]
-        self.neigh_prob = padding[3:-3, 3:-3].clone()
+            padding[i:(i+(2*self.n+1)), j:(j+(2*self.n+1))] += self.large_matrices[:, :, step]
+        self.neigh_prob = padding[self.n:-self.n, self.n:-self.n].clone()
 
     def update(self, tau=1):
 
